@@ -26,7 +26,7 @@ from tf2onnx.tfonnx import process_tf_graph, tf_optimize, DEFAULT_TARGET, POSSIB
 
 class Tf2OnnxBackendTestBase(unittest.TestCase):
     # static variables
-    TMPPATH = tempfile.mkdtemp()
+    TMPPATH = "Z:\\tmp" # tempfile.mkdtemp()
     BACKEND = os.environ.get("TF2ONNX_TEST_BACKEND", "onnxruntime")
     OPSET = int(os.environ.get("TF2ONNX_TEST_OPSET", 7))
     TARGET = os.environ.get("TF2ONNX_TEST_TARGET", "").split(",")

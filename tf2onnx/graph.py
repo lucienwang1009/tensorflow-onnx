@@ -39,6 +39,7 @@ class Node(object):
         self._input = [i for i in node.input]
         self._output = [i for i in node.output]
         self._attr = {}
+        self._control_input = []
         self.inserted_nchw = False
 
         graph.set_node_by_name(self)
@@ -103,6 +104,20 @@ class Node(object):
     def domain(self):
         """Return Op type."""
         return self._op.domain
+
+    @property
+    def control_input(self):
+        return self._control_input
+
+    @property
+    def control_inputs(self):
+        """Input node objects."""
+        val = [self.graph.get_node_by_output(n) for n in self._control_input]
+        return val
+
+    @control_input.setter
+    def control_input(self, control_input):
+        self._control_input = control_input
 
     @domain.setter
     def domain(self, val):
@@ -303,7 +318,7 @@ class Graph(object):
     """"Class that provides graph manipulation and matching."""
 
     def __init__(self, nodes, output_shapes=None, dtypes=None, target=None, opset=None, extra_opset=None,
-                 output_names=None):
+                 output_names=None, control_inputs={}):
         """Create Graph.
         Args:
             nodes: list of Node()
@@ -358,6 +373,9 @@ class Graph(object):
             ops.extend(to_append)
 
         self.set_nodes(ops)
+        # set control inputs for each node
+        for n, control_input in control_inputs.items():
+            self.get_node_by_name(n).control_input = control_input
 
     def create_new_graph_with_same_config(self):
         """Create a clean graph inheriting current graph's configuration."""
@@ -946,7 +964,7 @@ class Graph(object):
             a set of nodes
         """
         res_set = set()
-        if not dest_node:
+        if not dest_node or (input_checker and input_checker(dest_node) is False):
             return res_set
 
         processing_set = set([dest_node])

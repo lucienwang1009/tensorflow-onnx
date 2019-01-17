@@ -24,6 +24,7 @@ from tf2onnx import utils
 from tf2onnx.function import *  # pylint: disable=wildcard-import
 from tf2onnx.graph import Node, Graph
 from tf2onnx.graph_matcher import OpTypePattern, GraphMatcher
+from tf2onnx.rewriter.cond_rewriter import rewrite_cond, rewrite_cond_body_graph
 from tf2onnx.rewriter.random_uniform import rewrite_random_uniform, rewrite_random_uniform_fold_const
 from tf2onnx.rewriter.rnn import rewrite_bi_direction_gru
 from tf2onnx.rewriter.rnn import rewrite_custom_rnn_cell
@@ -70,6 +71,7 @@ def tflist_to_onnx(node_list, shape_override):
     onnx_nodes = []
     output_shapes = {}
     dtypes = {}
+    control_inputs = {}
 
     # find outputs
     ops = node_list
@@ -124,6 +126,7 @@ def tflist_to_onnx(node_list, shape_override):
 
         if takeit:
             try:
+                control_inputs[node.name] = [i.name for i in node.control_inputs]
                 input_names = [i.name for i in node.inputs]
                 output_names = [i.name for i in node.outputs]
                 onnx_node = helper.make_node(node.type, input_names, output_names, name=node.name, **attr)
@@ -132,7 +135,7 @@ def tflist_to_onnx(node_list, shape_override):
                 log.error("pass1 convert failed for %s, ex=%s", node, ex)
                 raise
 
-    return onnx_nodes, op_cnt, attr_cnt, output_shapes, dtypes
+    return onnx_nodes, op_cnt, attr_cnt, output_shapes, dtypes, control_inputs
 
 
 def tensorflow_to_onnx(graph, shape_override):
@@ -216,6 +219,21 @@ def broadcast_op(ctx, node, name, args):
     else:
         node.set_attr("broadcast", 0)
     return node
+
+
+def greater_op7(ctx, node, name, args):
+    nodes = []
+    input0 = node.input[0]
+    input1 = node.input[1]
+    input0_cast = ctx.insert_new_node_on_input(node, "Cast", node.input[0], to=onnx_pb.TensorProto.FLOAT)
+    ctx.copy_shape(node.input[0], input0_cast.output[0])
+    ctx.set_dtype(input0_cast.output[0], onnx_pb.TensorProto.FLOAT)
+    input1_cast = ctx.insert_new_node_on_input(node, "Cast", node.input[1], to=onnx_pb.TensorProto.FLOAT)
+    ctx.copy_shape(node.input[1], input1_cast.output[0])
+    ctx.set_dtype(input1_cast.output[0], onnx_pb.TensorProto.FLOAT)
+    nodes.extend([input0_cast, input1_cast])
+    nodes.append(broadcast_op7(ctx, node, name, args))
+    return nodes
 
 
 def broadcast_op7(ctx, node, name, args):
@@ -1533,6 +1551,7 @@ def reverse_op8(ctx, node, name, args):
     if time_major:
         # get back to time_major
         op_name = utils.make_name(node.name)
+        trans_back_node = None
         trans_back_node = ctx.insert_new_node_on_output("Transpose", node.output[0],
                                                         name=op_name, perm=perm_val)
         nodes.insert(0, trans_back_node)
@@ -2405,7 +2424,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
     if target is None:
         target = DEFAULT_TARGET
 
-    onnx_nodes, op_cnt, attr_cnt, output_shapes, dtypes = tensorflow_to_onnx(tf_graph, shape_override)
+    onnx_nodes, op_cnt, attr_cnt, output_shapes, dtypes, control_inputs = tensorflow_to_onnx(tf_graph, shape_override)
 
     if output_names:
         # check output existence in case user passed in wrong output ids
@@ -2415,7 +2434,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
                   "in format: placeholder_name:output_port_id. Outputs: ", non_exists)
             raise ValueError("Outputs Not Found")
 
-    g = Graph(onnx_nodes, output_shapes, dtypes, target, opset, extra_opset, output_names)
+    g = Graph(onnx_nodes, output_shapes, dtypes, target, opset, extra_opset, output_names, control_inputs)
 
     infer_shape_for_graph(g)
 
@@ -2430,7 +2449,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
                  rewrite_single_direction_lstm, rewrite_bi_direction_lstm,
                  rewrite_single_direction_gru, rewrite_single_direction_grublock,
                  rewrite_bi_direction_gru, rewrite_logical_compare_with_equal,
-                 rewrite_custom_rnn_cell, rewrite_generic_loop,
+                 rewrite_custom_rnn_cell, rewrite_generic_loop, rewrite_cond
                  ]
 
     if custom_rewriter is not None:
@@ -2464,6 +2483,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
         late_rewriters.append(rewrite_incomplete_type_support_rs5)
     if TARGET_RS6 in target:
         late_rewriters.append(rewrite_incomplete_type_support_rs6)
+    late_rewriters.append(rewrite_cond_body_graph)
     if late_rewriters:
         run_late_rewriters(g, late_rewriters, continue_on_error)
 
