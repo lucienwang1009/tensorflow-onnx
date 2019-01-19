@@ -2455,6 +2455,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
     if custom_rewriter is not None:
         rewriters.extend(custom_rewriter)
 
+    print(g._nodes_by_name)
     try:
         ops = g.get_nodes()
         for rewrite in rewriters:
@@ -2468,6 +2469,7 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
             log.info(ex_ext)
         else:
             raise ex
+    print(g._nodes_by_name)
 
     # some nodes may already copied into inner Graph, so remove them from main Graph.
     g.delete_unused_nodes(output_names)

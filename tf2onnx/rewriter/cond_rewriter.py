@@ -14,40 +14,30 @@ from collections import deque, defaultdict, OrderedDict
 from onnx import helper
 from tf2onnx import utils
 from tf2onnx.graph import Graph
-from tf2onnx.rewriter.rnn_utils import is_loopcond_op, is_tensor_array_op, is_tensor_array_write_op
-from tf2onnx.rewriter.rnn_utils import REWRITER_RESULT
+from tf2onnx.rewriter.loop_rewriter_base import LoopRewriterBase
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tf2onnx.rewriter.cond_rewriter_base")
-# log.setLevel(logging.DEBUG)
+log.setLevel(logging.DEBUG)
 
 # pylint: disable=missing-docstring,invalid-name,unused-argument,using-constant-test
 
-def remove_duplicate_list(l):
-    return list(set(l))
-
-def union_list(a, b):
-    return list(set(a).union(set(b)))
-
-def intersection_list(a, b):
-    return list(set(a).intersection(set(b)))
-
-class CondBodyGraph:
+class CondGraphContext:
     def __init__(self):
-        self.output = []
-        self.nodes = []
-        self.input = []
+        self.output = set()
+        self.nodes = set()
+        self.input = set()
 
     def union(self, cond_body_graph):
-        self.output = union_list(self.output, cond_body_graph.output)
-        self.nodes = union_list(self.nodes, cond_body_graph.nodes)
+        self.output |= cond_body_graph.output
+        self.nodes |= cond_body_graph.nodes
 
     def intersection(self, cond_body_graph):
         intersect_node = [
-            n.name for n in intersection_list(self.nodes, cond_body_graph.nodes)
+            n.name for n in self.nodes.intersection(cond_body_graph.nodes)
         ]
-        intersect_output = intersection_list(self.output, cond_body_graph.output)
-        return intersect_node + intersect_output
+        intersect_output = self.output.intersection(cond_body_graph.output)
+        return list(intersect_node) + list(intersect_output)
 
     def remove_duplicate(self):
         self.output = remove_duplicate_list(self.output)
@@ -56,31 +46,19 @@ class CondBodyGraph:
 
 
 class CondContext:
-    def __init__(self,
-                 cond_scope,
-                 pred_input,
-                 true_body_graph,
-                 false_body_graph,
-                 switchs,
-                 merges):
+    def __init__(self, cond_scope, pred_input, true_graph_context,
+                 false_graph_context, switchs, merges):
         self.cond_scope = cond_scope
         self.pred_input = pred_input
-        self.true_body_graph = true_body_graph
-        self.false_body_graph = false_body_graph
-        self.switchs = switchs
+        self.true_graph_context = true_graph_context
+        self.false_graph_context = false_graph_context
+        self.switchs = set(switchs)
+        # list of Merge in order
         self.merges = merges
+        self.if_node = None
         # output: true output, false output
-        self.true_output_mapping = {}
-        self.false_output_mapping = {}
-        # remove duplicate
-        self.remove_duplicate()
-
-    def remove_duplicate(self):
-        # remove duplicate
-        self.true_body_graph.remove_duplicate()
-        self.false_body_graph.remove_duplicate()
-        self.switchs = remove_duplicate_list(self.switchs)
-        self.merges = remove_duplicate_list(self.merges)
+        self.true_graph = None
+        self.false_graph = None
 
 
 class CondGraphMeta:
@@ -124,27 +102,27 @@ class CondRewriter:
         """trace back to the switch from merge nodes"""
         log.debug("trace back from [%s]", ",".join(n.name for n in merge_nodes))
         stack = [m for m in merge_nodes]
-        downstream_graph = defaultdict(CondBodyGraph)
+        downstream_graph = defaultdict(CondGraphContext)
         # take down output info
         for merge_node in merge_nodes:
             for i in merge_node.input:
                 input_node = self.g.get_node_by_output(i)
-                downstream_graph[input_node].output.append(i)
-        true_body_graph = CondBodyGraph()
-        false_body_graph = CondBodyGraph()
+                downstream_graph[input_node].output.add(i)
+        true_graph_context = CondGraphContext()
+        false_graph_context = CondGraphContext()
         switchs = set()
         while stack:
             node = stack.pop()
             # NOTE: input, control input and input of added if node
-            inputs = node.input + node.control_input + self._if_input.get(node, [])
+            inputs = node.input + node.control_input + node.get_implicit_inputs()
             for inp in inputs:
+                print(inp)
                 input_node = self.g.get_node_by_output(inp)
                 # control input
                 if not input_node:
                     log.debug("control input: %s", inp)
                     input_node = self.g.get_node_by_name(inp)
                     # downstream_graph[input_node].control_dependent = True
-                utils.make_sure(input_node, "cannot find node {}".format(inp))
                 if not input_node.name.startswith(name_scope):
                     raise ValueError(
                         "{} has different scope name from {}".format(input_node.name, name_scope)
@@ -156,43 +134,46 @@ class CondRewriter:
                     log.debug("encounter the first switch: %s", input_node.name)
                     # false
                     if input_node.output[0] == inp:
-                        false_body_graph.union(downstream_graph[node])
+                        false_graph_context.union(downstream_graph[node])
                         # NOTE: in case switch connects to merge directly
-                        false_body_graph.union(downstream_graph[input_node])
-                        false_body_graph.input.append(inp)
+                        false_graph_context.union(downstream_graph[input_node])
+                        false_graph_context.input.add(inp)
                         log.debug("=================false body graph===============")
-                        log.debug(false_body_graph.nodes)
-                        log.debug(false_body_graph.output)
-                        log.debug(false_body_graph.input)
+                        log.debug(false_graph_context.nodes)
+                        log.debug(false_graph_context.output)
+                        log.debug(false_graph_context.input)
                     # true
                     else:
-                        true_body_graph.union(downstream_graph[node])
-                        true_body_graph.union(downstream_graph[input_node])
-                        true_body_graph.input.append(inp)
+                        true_graph_context.union(downstream_graph[node])
+                        true_graph_context.union(downstream_graph[input_node])
+                        true_graph_context.input.add(inp)
                         log.debug("=================true body graph===============")
-                        log.debug(true_body_graph.nodes)
-                        log.debug(true_body_graph.output)
-                        log.debug(true_body_graph.input)
+                        log.debug(true_graph_context.nodes)
+                        log.debug(true_graph_context.output)
+                        log.debug(true_graph_context.input)
                     switchs.add(input_node)
+                    self._workaround_for_placeholder(input_node.input[0])
                 else:
-                    downstream_graph[input_node].nodes.append(input_node)
+                    downstream_graph[input_node].nodes.add(input_node)
                     downstream_graph[input_node].union(downstream_graph[node])
                     stack.append(input_node)
         # one node cannot belong to both true and false graph
-        intersection = true_body_graph.intersection(false_body_graph)
+        intersection = true_graph_context.intersection(false_graph_context)
         if intersection:
             raise ValueError("true graph and false graph intersect at [{}]".format(
                 ",".join(intersection)
             ))
-        return true_body_graph, false_body_graph, list(switchs)
+        return true_graph_context, false_graph_context, switchs
 
     def _workaround_for_placeholder(self, output):
+        op_name_scope = '/'.join(output.split('/')[:-1])
         output_node = self.g.get_node_by_output(output)
         if output_node.type == "Placeholder" or \
                 output_node.type == "Const":
             placeholder_id = self.g.make_node(
                 "Identity",
-                [output]
+                [output],
+                op_name_scope=op_name_scope
             )
             self._copy_dtype_and_shape(output, placeholder_id.output[0])
             self.g.replace_all_inputs(self.g.get_nodes(), output, placeholder_id.output[0])
@@ -204,18 +185,10 @@ class CondRewriter:
 
     def _parse_cond(self, name_scope, merge_nodes):
         """parse condition subgraph for these merge nodes"""
-        true_body_graph, false_body_graph, switchs = self._trace_back(name_scope, merge_nodes)
-        # find pred output from switch
-        pred_input = switchs[0].input[1]
-        cond_context = CondContext(
-            name_scope,
-            pred_input,
-            true_body_graph,
-            false_body_graph,
-            switchs,
-            merge_nodes
-        )
-        return cond_context
+        true_graph_context, false_graph_context, switchs = self._trace_back(name_scope, merge_nodes)
+        # find pred output from any switch
+        pred_input = list(switchs)[0].input[1]
+        return pred_input, true_graph_context, false_graph_context, switchs
 
     def _pair_output_with_merge(self, true_output, false_output, merges):
         """pair output according to the order of merges"""
@@ -225,14 +198,6 @@ class CondRewriter:
         log.debug("true outuput: %s", true_output)
         log.debug("false output: %s", false_output)
         log.debug("merges: %s", [m.input for m in merges])
-        utils.make_sure(
-            len(true_output)==len(merges),
-            "output info in true branch cannot match merges"
-        )
-        utils.make_sure(
-            len(false_output)==len(merges),
-            "output info in false branch cannot match merges"
-        )
         paired_false_output = []
         paired_true_output = []
         for merge in merges:
@@ -259,40 +224,34 @@ class CondRewriter:
         self.g.copy_dtype(old_output, new_output)
         self.g.copy_shape(old_output, new_output)
 
-    def _create_if_node(self, cond_context):
-        """create a if node without graph attribute"""
-        log.debug("create if node")
-        if_node = self.g.make_node(
-            "If",
-            [cond_context.pred_input],
-            op_name_scope=cond_context.cond_scope,
-            outputs=[m.output[0] for m in cond_context.merges],
-            skip_conversion=True
-        )
-        # take down inputs of if node for nest cond parsing
-        self._if_input[if_node] = union_list(
-            cond_context.true_body_graph.input,
-            cond_context.false_body_graph.input
-
-        )
-        # take down output mapping
+    def _set_branch_graph(self, cond_context):
+        """set body graph for each branch"""
+        log.debug("set graph for if branchs")
         paired_true_output, paired_false_output, _ = self._pair_output_with_merge(
-            cond_context.true_body_graph.output,
-            cond_context.false_body_graph.output,
+            cond_context.true_graph_context.output,
+            cond_context.false_graph_context.output,
             cond_context.merges
         )
-        true_output_mapping = {}
-        false_output_mapping = {}
-        for i in range(len(cond_context.merges)):
-            true_output_mapping[if_node.output[i]] = paired_true_output[i]
-            false_output_mapping[if_node.output[i]] = paired_false_output[i]
-        cond_context.true_output_mapping = true_output_mapping
-        cond_context.false_output_mapping = false_output_mapping
-        return if_node
+        cond_context.true_graph = utils.construct_graph_from_nodes(
+            self.g,
+            list(cond_context.true_graph_context.nodes),
+            paired_true_output,
+            [self.g.get_shape(out) for out in paired_true_output],
+            [self.g.get_dtype(out) for out in paired_true_output]
+        )
+        cond_context.false_graph = utils.construct_graph_from_nodes(
+            self.g,
+            list(cond_context.false_graph_context.nodes),
+            paired_false_output,
+            [self.g.get_shape(out) for out in paired_false_output],
+            [self.g.get_dtype(out) for out in paired_false_output]
+        )
+        cond_context.if_node.set_body_graph_as_attr("then_branch", cond_context.true_graph)
+        cond_context.if_node.set_body_graph_as_attr("else_branch", cond_context.false_graph)
 
     def _cut_off_connection(self, cond_context):
         """cut off switchs and merges"""
-        nodes_to_remove = cond_context.switchs + cond_context.merges
+        nodes_to_remove = list(cond_context.switchs) + list(cond_context.merges)
         nodes_to_add = []
         log.debug("cut off switch connection")
         # replace switch with identity node
@@ -303,18 +262,25 @@ class CondRewriter:
                 outputs=[switch.output[0]],
                 op_name_scope=cond_context.cond_scope
             )
+            cond_context.false_graph_context.nodes.add(false_switch_id)
             true_switch_id = self.g.make_node(
                 "Identity",
                 [switch.input[0]],
                 outputs=[switch.output[1]],
                 op_name_scope=cond_context.cond_scope
             )
+            cond_context.true_graph_context.nodes.add(true_switch_id)
             nodes_to_add.extend([false_switch_id, true_switch_id])
         # replace merge with if node
         log.debug("cut off merge connection")
-        if_node = self._create_if_node(cond_context)
-        nodes_to_add.append(if_node)
-        cond_context.if_node = if_node
+        cond_context.if_node = self.g.make_node(
+            "If",
+            [cond_context.pred_input],
+            op_name_scope=cond_context.cond_scope,
+            outputs=[m.output[0] for m in cond_context.merges],
+            skip_conversion=False
+        )
+        nodes_to_add.append(cond_context.if_node)
         return nodes_to_add, nodes_to_remove
 
     def _insert_id_on_input(self, inputs, op_name_scope=None):
@@ -333,18 +299,18 @@ class CondRewriter:
         ids = []
         # ids.extend(
         #     self._insert_id_on_input(
-        #         cond_context.true_body_graph.input,
+        #         cond_context.true_graph_context.input,
         #         cond_context.cond_scope
         #     ).values()
         # )
         # ids.extend(
         #     self._insert_id_on_input(
-        #         cond_context.false_body_graph.input,
+        #         cond_context.false_graph_context.input,
         #         cond_context.cond_scope
         #     ).values()
         # )
         node_mapping = self._insert_id_on_input(
-            cond_context.true_body_graph.output,
+            cond_context.true_graph_context.output,
             cond_context.cond_scope
         )
         ids.extend(node_mapping.values())
@@ -352,9 +318,9 @@ class CondRewriter:
         for outter_out, inner_out in cond_context.true_output_mapping.items():
             cond_context.true_output_mapping[outter_out] = \
                 node_mapping[inner_out].output[0]
-        cond_context.true_body_graph.output = cond_context.true_output_mapping.values()
+        cond_context.true_graph_context.output = cond_context.true_output_mapping.values()
         node_mapping = self._insert_id_on_input(
-            cond_context.false_body_graph.output,
+            cond_context.false_graph_context.output,
             cond_context.cond_scope
         )
         ids.extend(node_mapping.values())
@@ -362,10 +328,11 @@ class CondRewriter:
         for outter_out, inner_out in cond_context.false_output_mapping.items():
             cond_context.false_output_mapping[outter_out] = \
                 node_mapping[inner_out].output[0]
-        cond_context.false_body_graph.output = cond_context.false_output_mapping.values()
+        cond_context.false_graph_context.output = cond_context.false_output_mapping.values()
         return ids
 
-    def pre_run(self):
+    def run(self):
+        """tf.cond rewriter"""
         # find all merge Op, merge ops with the same name scope belong to the same condition
         name_scope_merges = defaultdict(list)
         all_nodes = self.g.get_nodes()
@@ -381,29 +348,35 @@ class CondRewriter:
 
         # list keep the order so that we can handle nest cond
         for name_scope, merge_nodes in name_scope_merges.items():
-            cond_context = self._parse_cond(name_scope, merge_nodes)
+            pred_input, true_graph_context, false_graph_context, switchs = \
+                self._parse_cond(name_scope, merge_nodes)
+            cond_context = CondContext(
+                name_scope,
+                pred_input,
+                true_graph_context,
+                false_graph_context,
+                switchs,
+                merge_nodes
+            )
             nodes_to_add, nodes_to_remove = self._cut_off_connection(cond_context)
-            nodes_to_add.extend(self._add_id_on_input_output(cond_context))
+            self._set_branch_graph(cond_context)
+            nodes_to_remove.extend(
+                list(cond_context.true_graph_context.nodes) + \
+                list(cond_context.false_graph_context.nodes)
+            )
             self._update_nodes(nodes_to_add, nodes_to_remove)
-            # for post rewriter
-            cond_context.remove_duplicate()
-            CondGraphDict.COND_CONTEXT_DICT[cond_context.if_node] = cond_context
         log.debug("cond pre rewrite done")
 
         return self.g.get_nodes()
 
-    def pre_rewrite(self):
+    def rewrite(self):
         log.debug("enter cond pre rewrite")
-        try:
-            return self.pre_run()
-        except Exception as ex:
-            self._empty_cond_context_dict()
-            raise ex
+        return self.run()
 
     def _update_nodes(self, nodes_to_add=[], nodes_to_remove=[]):
         all_nodes = self.g.get_nodes()
-        nodes_to_add = remove_duplicate_list(nodes_to_add)
-        nodes_to_remove = remove_duplicate_list(nodes_to_remove)
+        nodes_to_add = list(set(nodes_to_add))
+        nodes_to_remove = list(set(nodes_to_remove))
         for n in nodes_to_remove:
             if n in all_nodes:
                 all_nodes.remove(n)
@@ -413,9 +386,9 @@ class CondRewriter:
     def _extract_cond_graph(self, cond_context, true_or_false=True):
         cond_body_graph = None
         if true_or_false:
-            cond_body_graph = cond_context.true_body_graph
+            cond_body_graph = cond_context.true_graph_context
         else:
-            cond_body_graph = cond_context.false_body_graph
+            cond_body_graph = cond_context.false_graph_context
         log.debug(
             "extract graph from %s to %s",
             cond_body_graph.output,
@@ -474,11 +447,11 @@ class CondRewriter:
         for if_node, cond_context in CondGraphDict.COND_CONTEXT_DICT.items():
             log.debug("post rewrite %s", cond_context.cond_scope)
             log.debug("===============post true graph=================")
-            log.debug(cond_context.true_body_graph.output)
-            log.debug(cond_context.true_body_graph.input)
+            log.debug(cond_context.true_graph_context.output)
+            log.debug(cond_context.true_graph_context.input)
             log.debug("===============post false graph=================")
-            log.debug(cond_context.false_body_graph.output)
-            log.debug(cond_context.false_body_graph.input)
+            log.debug(cond_context.false_graph_context.output)
+            log.debug(cond_context.false_graph_context.input)
 
             true_branch_nodes = self._extract_cond_graph(cond_context, True)
             false_branch_nodes = self._extract_cond_graph(cond_context, False)
@@ -493,10 +466,10 @@ class CondRewriter:
                 if_node.output
             )
             log.debug("true graph: %s", true_branch_nodes)
-            log.debug("true input: %s", cond_context.true_body_graph.input)
+            log.debug("true input: %s", cond_context.true_graph_context.input)
             log.debug("true output: %s", true_output)
             log.debug("false graph: %s", false_branch_nodes)
-            log.debug("false input: %s", cond_context.false_body_graph.input)
+            log.debug("false input: %s", cond_context.false_graph_context.input)
             log.debug("false output: %s", false_output)
             true_onnx_graph = self._make_cond_graph(
                 true_branch_nodes,
@@ -526,7 +499,7 @@ class CondRewriter:
 
 
 def rewrite_cond(g, ops):
-    return CondRewriter(g).pre_rewrite()
+    return CondRewriter(g).rewrite()
 
 def rewrite_cond_body_graph(g, ops):
     return CondRewriter(g).post_rewrite()

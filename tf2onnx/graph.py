@@ -311,7 +311,7 @@ class Node(object):
                 output_available_in_cur_graph.add(n)
 
         outer_scope_node_input_ids = all_node_inputs - output_available_in_cur_graph
-        return outer_scope_node_input_ids
+        return list(outer_scope_node_input_ids)
 
 
 class Graph(object):
@@ -759,6 +759,7 @@ class Graph(object):
                                   initializer=initializers,
                                   doc_string=doc)
 
+        print(graph)
         return graph
 
     def make_model(self, graph_doc, optimize=False, graph_name="tf2onnx", **kwargs):
