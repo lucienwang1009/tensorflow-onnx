@@ -24,7 +24,7 @@ from tf2onnx import utils
 from tf2onnx.function import *  # pylint: disable=wildcard-import
 from tf2onnx.graph import Node, Graph
 from tf2onnx.graph_matcher import OpTypePattern, GraphMatcher
-from tf2onnx.rewriter.cond_rewriter import rewrite_cond, rewrite_cond_body_graph
+from tf2onnx.rewriter.cond_rewriter import rewrite_cond
 from tf2onnx.rewriter.random_uniform import rewrite_random_uniform, rewrite_random_uniform_fold_const
 from tf2onnx.rewriter.rnn import rewrite_bi_direction_gru
 from tf2onnx.rewriter.rnn import rewrite_custom_rnn_cell
@@ -2455,7 +2455,6 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
     if custom_rewriter is not None:
         rewriters.extend(custom_rewriter)
 
-    print(g._nodes_by_name)
     try:
         ops = g.get_nodes()
         for rewrite in rewriters:
@@ -2469,7 +2468,6 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
             log.info(ex_ext)
         else:
             raise ex
-    print(g._nodes_by_name)
 
     # some nodes may already copied into inner Graph, so remove them from main Graph.
     g.delete_unused_nodes(output_names)
@@ -2485,7 +2483,6 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
         late_rewriters.append(rewrite_incomplete_type_support_rs5)
     if TARGET_RS6 in target:
         late_rewriters.append(rewrite_incomplete_type_support_rs6)
-    late_rewriters.append(rewrite_cond_body_graph)
     if late_rewriters:
         run_late_rewriters(g, late_rewriters, continue_on_error)
 

@@ -298,7 +298,8 @@ class Node(object):
             graph = graphs.pop()
             for n in graph.get_nodes():
                 output_available_in_cur_graph |= set(n.output)
-                for i in n.input:
+                inputs = n.input + n.control_input
+                for i in inputs:
                     all_node_inputs.add(i)
 
                 if recursive:
@@ -759,7 +760,6 @@ class Graph(object):
                                   initializer=initializers,
                                   doc_string=doc)
 
-        print(graph)
         return graph
 
     def make_model(self, graph_doc, optimize=False, graph_name="tf2onnx", **kwargs):
@@ -972,10 +972,12 @@ class Graph(object):
         while processing_set:
             top_node = processing_set.pop()
             res_set.add(top_node)
-            all_inputs = top_node.input + list(top_node.get_implicit_inputs())
+            all_inputs = top_node.input + top_node.control_input + list(top_node.get_implicit_inputs())
             for input_id in all_inputs:
                 # we don't care about nested graph here, just handle current graph cropping.
                 node = self.get_node_by_output(input_id, search_in_parent_graphs=False)
+                if not node:
+                    node = self.get_node_by_name(input_id)
                 if not node:
                     # some node (for example Scan) has optional inputs, which
                     # might has empty input.
@@ -1018,6 +1020,11 @@ class Graph(object):
         """Delete nodes not in subgraph ending with output_names."""
         if outputs_name:
             related_nodes = self.extract_sub_graph_nodes(outputs_name)
+            for node in related_nodes:
+                attr_body_graphs = node.get_body_graphs()
+                if attr_body_graphs:
+                    for _, body_graph in attr_body_graphs.items():
+                        body_graph.delete_unused_nodes(body_graph.outputs)
             self.set_nodes(related_nodes)
         else:
             print("WARINING: outputs not specified, delete_unused_nodes not taking effect.")

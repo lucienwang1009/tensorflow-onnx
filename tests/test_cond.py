@@ -131,7 +131,7 @@ class CondTests(Tf2OnnxBackendTestBase):
         x = tf.placeholder(tf.float32, x_val.shape, name="input_1")
         y = tf.placeholder(tf.float32, y_val.shape, name="input_2")
         res = tf.case([(tf.reduce_all(x<1), lambda: x+y), (tf.reduce_all(y>0), lambda: tf.square(y))],
-                      default=lambda: x, name="test_case")
+                      default=lambda: x, name="test_case", exclusive=True)
         _ = tf.identity(res, name="output")
 
         feed_dict = {"input_1:0": x_val, "input_2:0": y_val}
@@ -164,32 +164,32 @@ class CondTests(Tf2OnnxBackendTestBase):
         output_names_with_port = ["output:0"] #, "output1:0"]
         self.run_test_case(feed_dict, input_names_with_port, output_names_with_port)
 
-    def test_cond_temp(self):
-        x_val = np.array([1,2,3], dtype=np.float32)
-        y_val = np.array([4,5,6], dtype=np.float32)
-        z_val = np.array(5, dtype=np.float32)
-        x = tf.placeholder(tf.float32, x_val.shape, name="input_1")
-        y = tf.placeholder(tf.float32, y_val.shape, name="input_2")
-        # b = tf.constant(5, name="b", dtype=tf.float32)
-        true_const = tf.constant(True, name="true_const", dtype=tf.bool)
-        def cond_graph():
-            with tf.name_scope("cond_graph", "cond_graph", [x, y]):
-                a = tf.constant(True, name="a", dtype=tf.bool)
-                b = tf.constant(10, name="b", dtype=tf.float32)
-                # z = tf.identity(x, name="x_id")
-                # return tf.cond(x[1] < y[1], lambda: x, lambda: y, name="test_inner")
-                # return tf.cond(a, lambda: b, lambda: b)
-                return b
-        res = tf.cond(x[0]<y[0], lambda: b, lambda: b, name="test")
-        # res = tf.cond(a<b, lambda: tf.add(x,y), lambda: tf.square(y))
-        # res1 = tf.cond(tf.reduce_any(x<y), cond_graph, lambda: tf.square(y))
-        _ = tf.identity(res, name="output")
-        #_ = tf.identity(res1, name="output1")
+    # def test_cond_temp(self):
+    #     x_val = np.array([1,2,3], dtype=np.float32)
+    #     y_val = np.array([4,5,6], dtype=np.float32)
+    #     z_val = np.array(5, dtype=np.float32)
+    #     x = tf.placeholder(tf.float32, x_val.shape, name="input_1")
+    #     y = tf.placeholder(tf.float32, y_val.shape, name="input_2")
+    #     # b = tf.constant(5, name="b", dtype=tf.float32)
+    #     true_const = tf.constant(True, name="true_const", dtype=tf.bool)
+    #     def cond_graph():
+    #         with tf.name_scope("cond_graph", "cond_graph", [x, y]):
+    #             a = tf.constant(True, name="a", dtype=tf.bool)
+    #             b = tf.constant(10, name="b", dtype=tf.float32)
+    #             # z = tf.identity(x, name="x_id")
+    #             # return tf.cond(x[1] < y[1], lambda: x, lambda: y, name="test_inner")
+    #             # return tf.cond(a, lambda: b, lambda: b)
+    #             return b
+    #     res = tf.cond(x[0]<y[0], lambda: b, lambda: b, name="test")
+    #     # res = tf.cond(a<b, lambda: tf.add(x,y), lambda: tf.square(y))
+    #     # res1 = tf.cond(tf.reduce_any(x<y), cond_graph, lambda: tf.square(y))
+    #     _ = tf.identity(res, name="output")
+    #     #_ = tf.identity(res1, name="output1")
 
-        feed_dict = {"input_1:0": x_val, "input_2:0": y_val}
-        input_names_with_port = ["input_1:0", "input_2:0"]
-        output_names_with_port = ["output:0"] #, "output1:0"]
-        self.run_test_case(feed_dict, input_names_with_port, output_names_with_port)
+    #     feed_dict = {"input_1:0": x_val, "input_2:0": y_val}
+    #     input_names_with_port = ["input_1:0", "input_2:0"]
+    #     output_names_with_port = ["output:0"] #, "output1:0"]
+    #     self.run_test_case(feed_dict, input_names_with_port, output_names_with_port)
 
 
 if __name__ == '__main__':

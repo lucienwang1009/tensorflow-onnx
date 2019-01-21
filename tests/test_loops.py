@@ -31,6 +31,19 @@ class LoopTests(Tf2OnnxBackendTestBase):
         output_names_with_port = ["output:0"]
         self.run_test_case(feed_dict, input_names_with_port, output_names_with_port, rtol=1e-06)
 
+    def test_simple_while_loop_const(self):
+        i = tf.placeholder(tf.int32, (), name="input_1")
+        z = tf.constant(11, dtype=tf.int32, name="const")
+        c = lambda i: tf.less(z, 10)
+        b = lambda i: z
+        r = tf.while_loop(c, b, [i])
+
+        _ = tf.identity(r, name="output")
+        input_names_with_port = ["input_1:0"]
+        feed_dict = {"input_1:0": np.array(0, dtype=np.int32)}
+
+        output_names_with_port = ["output:0"]
+        self.run_test_case(feed_dict, input_names_with_port, output_names_with_port, rtol=1e-06)
 
     def test_simple_while_loop_2(self):
         i = tf.placeholder(tf.int32, (), name="input_1")

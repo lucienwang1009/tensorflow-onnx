@@ -304,6 +304,7 @@ def construct_graph_from_nodes(parent_g, nodes, outputs, shapes, dtypes):
         body_graphs = op.graph.contained_graphs.pop(op.name, None)
         if body_graphs:
             for attr_name, body_graph in body_graphs.items():
+                body_graph.parent_graph = g
                 new_node.set_body_graph_as_attr(attr_name, body_graph)
         ops.append(new_node)
 
@@ -331,3 +332,7 @@ def construct_graph_from_nodes(parent_g, nodes, outputs, shapes, dtypes):
     g.set_nodes(cell_nodes)
     g.outputs = new_output_names
     return g
+
+
+def tf_name_scope(name):
+    return '/'.join(name.split('/')[:-1])

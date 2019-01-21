@@ -17,6 +17,7 @@ from tf2onnx.rewriter.rnn_utils import REWRITER_RESULT
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tf2onnx.rewriter.loop_rewriter_base")
+log.setLevel(logging.DEBUG)
 INVALID_INPUT_ID = utils.make_name("invalid_input_id")
 
 # todo(pengwa) remove protected-access with changes to Graph/Node later.
@@ -226,9 +227,9 @@ class LoopRewriterBase(object):
                 elif _result == REWRITER_RESULT.FAIL:
                     raise ValueError("rewrite failed, so just fast fail it")
 
-        # if self.g.outputs:
-        #     # clean the graph based on output names.
-        #     self.g.delete_unused_nodes(self.g.outputs)
+        if self.g.outputs:
+            # clean the graph based on output names.
+            self.g.delete_unused_nodes(self.g.outputs)
         return self.g.get_nodes()
 
     def _check_in_read_only_mode(self, context):
