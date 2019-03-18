@@ -1012,14 +1012,15 @@ def stridedslice_op(ctx, node, name, args):
             [new_end_concat.output[0]],
             attr={"axes": [1], "keepdims": 0}
         )
+        shapes = node.output_shapes
+        dtypes = node.output_dtypes
+        ctx.remove_node(name)
         dynamic_slice = ctx.make_node(
             "DynamicSlice",
             [node.input[0], new_begin.output[0], new_end.output[0]],
-            outputs=[node.output[0]]
+            outputs=[node.output[0]], shapes=shapes, dtypes=dtypes
         )
-        nodes.extend([begin_mask_const, end_mask_const, begin_unsqueeze, end_unsqueeze,
-                      new_begin_concat, new_end_concat, new_begin, new_end, dynamic_slice])
-        return nodes
+        return
     begin = node.inputs[1].get_tensor_value(as_list=False)
     end = node.inputs[2].get_tensor_value(as_list=False)
     strides = node.inputs[3].get_tensor_value(as_list=False)
