@@ -925,6 +925,7 @@ def expanddims_op7(ctx, node, name, args):
 
 
 def stridedslice_op(ctx, node, name, args):
+    # T output = StridedSlice(T input, @int32 begin, @int32 end, @int32 strides)
     # for now we implement common cases. Things like strides!=1 are not mappable to onnx.
     not_supported_attr = ["ellipsis_mask", "new_axis_mask"]
     for attr_name in not_supported_attr:
@@ -932,6 +933,93 @@ def stridedslice_op(ctx, node, name, args):
         if attr is not None and attr.i != 0:
             raise ValueError("StridedSlice: attribute " + attr_name + " not supported")
     input_shape = ctx.get_shape(node.input[0])
+    # use dynamic_slice in the case begin or end is dynamic tensor.
+    # T output = DynamicSlice(T input, Tind starts, Tind ends, Tind axes)
+    if not node.inputs[1].is_const() or not node.inputs[2].is_const():
+        nodes = []
+        shrink_axis_mask = node.get_attr("shrink_axis_mask")
+        if shrink_axis_mask is not None and shrink_axis_mask.i != 0:
+            raise ValueError("StridedSlice: attribute shrink_axis_mask not supported for DynamicSlice")
+        strides = node.inputs[3].get_tensor_value(as_list=False)
+        if not np.all(strides == 1):
+            raise ValueError("StridedSlice: only strides=1 is supported")
+        node.type = "DynamicSlice"
+        ctx.remove_input(node, node.input[3])
+        # deal with begin_mask and end_mask
+        shape = ctx.get_shape(node.input[1])[0]
+        if shape is None:
+            shape = ctx.get_shape(node.input[2])[0]
+        dtype = ctx.get_dtype(node.input[1])
+        if dtype is None:
+            dtype = ctx.get_dtype(node.input[2])
+        utils.make_sure(shape != None and dtype != None, "Require the shape and dtype of begin or end to mask them.")
+        np_dtype = utils.ONNX_TO_NUMPY_DTYPE[dtype]
+
+        begin_mask = node.get_attr("begin_mask")
+        begin_mask = begin_mask.i if begin_mask is not None else 0
+        end_mask = node.get_attr("end_mask")
+        end_mask = end_mask.i if end_mask is not None else 0
+        begin_mask_auxiliary = []
+        end_mask_auxiliary = []
+        for i in range(shape):
+            mask = (begin_mask >> i) & 1
+            if mask != 0:
+                begin_mask_auxiliary.append(0)
+            else:
+                begin_mask_auxiliary.append(np.iinfo(np_dtype).max)
+
+            mask = (end_mask >> i) & 1
+            if mask != 0:
+                end_mask_auxiliary.append(np.iinfo(np_dtype).max)
+            else:
+                end_mask_auxiliary.append(0)
+        begin_mask_const = ctx.make_const(
+            utils.make_name("{}_begin_mask".format(node.name)),
+            np.array([begin_mask_auxiliary], dtype=np_dtype)
+        )
+        end_mask_const = ctx.make_const(
+            utils.make_name("{}_end_mask".format(node.name)),
+            np.array([end_mask_auxiliary], dtype=np_dtype)
+        )
+        # mask begin and end
+        begin_unsqueeze = ctx.make_node(
+            "Unsqueeze",
+            [node.input[1]],
+            attr={"axes": [0]}
+        )
+        new_begin_concat = ctx.make_node(
+            "Concat",
+            [begin_unsqueeze.output[0], begin_mask_const.output[0]],
+            attr={"axis": 0}
+        )
+        new_begin = ctx.make_node(
+            "ReduceMin",
+            [new_begin_concat.output[0]],
+            attr={"axes": [1], "keepdims": 0}
+        )
+        end_unsqueeze = ctx.make_node(
+            "Unsqueeze",
+            [node.input[2]],
+            attr={"axes": [0]}
+        )
+        new_end_concat = ctx.make_node(
+            "Concat",
+            [end_unsqueeze.output[0], end_mask_const.output[0]],
+            attr={"axis": 0}
+        )
+        new_end = ctx.make_node(
+            "ReduceMax",
+            [new_end_concat.output[0]],
+            attr={"axes": [1], "keepdims": 0}
+        )
+        dynamic_slice = ctx.make_node(
+            "DynamicSlice",
+            [node.input[0], new_begin.output[0], new_end.output[0]],
+            outputs=[node.output[0]]
+        )
+        nodes.extend([begin_mask_const, end_mask_const, begin_unsqueeze, end_unsqueeze,
+                      new_begin_concat, new_end_concat, new_begin, new_end, dynamic_slice])
+        return nodes
     begin = node.inputs[1].get_tensor_value(as_list=False)
     end = node.inputs[2].get_tensor_value(as_list=False)
     strides = node.inputs[3].get_tensor_value(as_list=False)
