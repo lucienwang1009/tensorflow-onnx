@@ -9,6 +9,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import copy
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ import tensorflow as tf
 from tensorflow.core.framework import types_pb2, tensor_pb2
 from google.protobuf import text_format
 import onnx
-from onnx import helper, onnx_pb, defs, numpy_helper
+from onnx import helper, onnx_pb, defs, numpy_helper, OperatorSetIdProto, shape_inference
 from . import constants
 
 #
@@ -223,6 +224,12 @@ def node_name(name):
     return name
 
 
+def make_onnx_dtype(dtype):
+    if not dtype:
+        return onnx_pb.TensorProto.UNDEFINED
+    return dtype
+
+
 def make_onnx_shape(shape):
     """shape with -1 is not valid in onnx ... make it a name."""
     if shape:
@@ -242,7 +249,12 @@ def make_onnx_inputs_outputs(name, elem_type, shape, **kwargs):
        elem_type,  # type: TensorProto.DataType
        shape,  # type: Optional[Sequence[int]]
     """
-    return helper.make_tensor_value_info(name, elem_type, make_onnx_shape(shape), **kwargs)
+    return helper.make_tensor_value_info(
+        name,
+        make_onnx_dtype(elem_type),
+        make_onnx_shape(shape),
+        **kwargs
+    )
 
 
 def find_opset(opset):
@@ -306,7 +318,7 @@ def construct_graph_from_nodes(parent_g, nodes, outputs, shapes, dtypes):
         all_outputs |= set(op.output)
 
         new_node = g.make_node(op.type, op.input, outputs=op.output, attr=op.attr, name=op.name,
-                               skip_conversion=op.skip_conversion)
+                               skip_conversion=op._skip_conversion, auto_infer_shape_dtype=False)
         body_graphs = op.graph.contained_graphs.pop(op.name, None)
         if body_graphs:
             for attr_name, body_graph in body_graphs.items():
@@ -354,7 +366,6 @@ def save_protobuf(path, message, as_text=False):
     else:
         with open(path, "wb") as f:
             f.write(message.SerializeToString())
-
 
 def is_list_or_tuple(obj):
     return isinstance(obj, (list, tuple))
@@ -437,3 +448,52 @@ def is_onnx_domain(domain):
     if domain is None or domain == "":
         return True
     return False
+
+
+def build_onnx_op(node):
+    """Build onnx op"""
+    onnx_node = helper.make_node(node.type, node.input, node.output, name=node.name)
+    # deal with attributes
+    attr = []
+    attr_graphs = node.get_body_graphs()
+    if attr_graphs:
+        for attr_name, sub_graph in attr_graphs.items():
+            copied_sub_graph = copy.deepcopy(sub_graph)
+            graph_proto = copied_sub_graph.make_graph("graph for " + node.name + " " + attr_name)
+            attr.append(helper.make_attribute(attr_name, graph_proto))
+    attr.extend([a for a in node.attr_onnx.values()])
+    if attr:
+        onnx_node.attribute.extend(attr)
+    return onnx_node
+
+
+def infer_onnx_shape_dtype(node, input_shapes, input_dtypes, opset=constants.PREFERRED_OPSET):
+    """infer shapes and dtypes for outputs of the node"""
+    shapes = {}
+    dtypes = {}
+    inputs = []
+    outputs = []
+    for inp, shape, dtype in zip(node.input, input_shapes, input_dtypes):
+        inputs.append(make_onnx_inputs_outputs(inp, dtype, shape))
+    for output in node.output:
+        outputs.append(make_onnx_inputs_outputs(output, onnx_pb.TensorProto.UNDEFINED, None))
+    graph_def = helper.make_graph([build_onnx_op(node)], "infer-graph", inputs, outputs)
+    imp = OperatorSetIdProto()
+    imp.version = opset
+    model_def = helper.make_model(graph_def, opset_imports=[imp])
+
+    inferred_model = shape_inference.infer_shapes(model_def)
+    for output in inferred_model.graph.output:
+        tensor_type = output.type.tensor_type
+        if tensor_type.HasField("elem_type"):
+            dtypes[output.name] = tensor_type.elem_type
+        else:
+            dtypes[output.name] = onnx_pb.TensorProto.UNDEFINED
+        # 0 in shapes of onnx means unknown which is -1 in our convertor
+        if tensor_type.HasField("shape"):
+            shapes[output.name] = [
+                dim.dim_value if dim.dim_value != 0 else ONNX_UNKNOWN_DIMENSION for dim in tensor_type.shape.dim
+            ]
+        else:
+            shapes[output.name] = None
+    return shapes, dtypes
