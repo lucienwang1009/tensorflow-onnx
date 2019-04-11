@@ -25,6 +25,26 @@ def _make_range_non_const(ctx, start, limit, delta, output, scope_name, shape, d
                   domain=constants.MICROSOFT_DOMAIN)
 
 
+@tf_op(["NonMaXSuppressionV2", "NonMaxSuppressionV3"], domain=constants.MICROSOFT_DOMAIN, onnx_op="NonMaxSuppression")
+class NonMaxSuppresion:
+    @classmethod
+    def version_1(cls, ctx, node, **kwargs):
+        # in tf: T_y select_indices = NonMaxSuppressionV2(T boxes, T scores,
+        #                                                 int32 max_output_size, float iou_threshold, float score_threshold)
+        # in onnx NonMaxSuppressionV2(boxes, scores, max_output_size, float32 iou_threshold, float32 score_threshold)
+        # the last 3 params are optional
+        node.domain = constants.MICROSOFT_DOMAIN
+        # tf boxes is 2D ([boxes_num, 4]) while onnx is 3D ([num_batches, boxes_num, 4])
+        # tf scores is 1D ([boxes_num])while onnx is 2D ([num_batches, num_classes, boxes_num])
+        # onnx output is [num_selected_boxes, 3], the meaning of last dim is [batch_index, class_index, box_index]
+        # while tf's output is [num_selected_boxes]
+        ctx.insert_new_node_on_input(node, "Unsqueeze", node.input[0], axes=[0])
+        ctx.insert_new_node_on_input(node, "Unsqueeze", node.input[1], axes=[0, 1])
+        slice_op = ctx.insert_new_node_on_output("Slice", node.output[0], name=utils.make_name("slice"),
+                                                 axes=[1], ends=[3], starts=[2])
+        ctx.insert_new_node_on_output("Squeeze", slice_op.output[0], name=utils.make_name("squeeze"), axes=[1])
+
+
 @tf_op("Range", domain=constants.MICROSOFT_DOMAIN)
 class Range:
     @classmethod
